@@ -21,6 +21,24 @@ class YouTubeService extends EventEmitter {
     if (process.platform === 'win32') {
       this.ytDlpPath = path.join(__dirname, '../bin/yt-dlp.exe');
     }
+    
+    // Ensure executable permissions on Linux/Mac
+    this._ensureExecutablePermissions();
+  }
+
+  async _ensureExecutablePermissions() {
+    try {
+      // Only needed on non-Windows platforms
+      if (process.platform !== 'win32') {
+        const exists = await fs.pathExists(this.ytDlpPath);
+        if (exists) {
+          await fs.chmod(this.ytDlpPath, 0o755); // rwxr-xr-x permissions
+          console.log('✅ Set executable permissions on yt-dlp');
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not set executable permissions:', error.message);
+    }
   }
 
   _escapeArg(arg) {
