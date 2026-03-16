@@ -24,6 +24,33 @@ class YouTubeService extends EventEmitter {
     
     // Ensure executable permissions on Linux/Mac
     this._ensureExecutablePermissions();
+    
+    // Check if cookies exist at startup
+    this._checkCookies();
+  }
+
+  async _checkCookies() {
+    try {
+      const cookiesExist = await fs.pathExists(this.cookiesPath);
+      if (cookiesExist) {
+        const stats = await fs.stat(this.cookiesPath);
+        console.log(`✅ Cookies file found at: ${this.cookiesPath}`);
+        console.log(`📁 File size: ${stats.size} bytes`);
+        
+        // Read first line to verify format
+        const fileContent = await fs.readFile(this.cookiesPath, 'utf8');
+        const firstLine = fileContent.split('\n')[0];
+        if (firstLine.includes('# Netscape HTTP Cookie File')) {
+          console.log('✅ Cookies file format is correct');
+        } else {
+          console.warn('⚠️ Cookies file may have incorrect format');
+        }
+      } else {
+        console.warn('⚠️ No cookies file found at:', this.cookiesPath);
+      }
+    } catch (error) {
+      console.warn('⚠️ Error checking cookies:', error.message);
+    }
   }
 
   async _ensureExecutablePermissions() {
@@ -34,6 +61,10 @@ class YouTubeService extends EventEmitter {
         if (exists) {
           await fs.chmod(this.ytDlpPath, 0o755); // rwxr-xr-x permissions
           console.log('✅ Set executable permissions on yt-dlp');
+          
+          // Verify it works
+          const { stdout } = await execPromise(`"${this.ytDlpPath}" --version`);
+          console.log(`✅ yt-dlp version: ${stdout.trim()}`);
         }
       }
     } catch (error) {
@@ -50,7 +81,6 @@ class YouTubeService extends EventEmitter {
     try {
       const exists = await fs.pathExists(this.ytDlpPath);
       if (exists) {
-        console.log('Using bundled yt-dlp executable');
         return this.ytDlpPath;
       }
     } catch (error) {
@@ -58,7 +88,7 @@ class YouTubeService extends EventEmitter {
     }
     
     // Fall back to python module if bundled executable not found
-    console.log('Falling back to python module');
+    console.warn('Falling back to python module');
     return 'python -m yt_dlp';
   }
 
@@ -69,13 +99,13 @@ class YouTubeService extends EventEmitter {
       const cookiesExist = await fs.pathExists(this.cookiesPath);
       if (cookiesExist) {
         options.push(`--cookies ${this._escapeArg(this.cookiesPath)}`);
-        console.log('Using cookies for authentication');
+        console.log('🔑 Using cookies for authentication');
       } else if (this.visitorData) {
         const extractorArgs = `youtubetab:skip=webpage;youtube:player_skip=webpage,configs;visitor_data=${this.visitorData}`;
         options.push(`--extractor-args ${this._escapeArg(extractorArgs)}`);
-        console.log('Using visitor data for authentication');
+        console.log('🔑 Using visitor data for authentication');
       } else {
-        console.log('No authentication method available');
+        console.log('⚠️ No authentication method available');
       }
     } catch (error) {
       console.warn('Error checking cookies:', error.message);
@@ -92,7 +122,7 @@ class YouTubeService extends EventEmitter {
       
       const command = `${ytDlpCmd} ${authOptions} "ytsearch${maxResults}:${escapedQuery}" --dump-json --no-playlist --skip-download`;
       
-      console.log('Executing search command:', command);
+      console.log('🔍 Executing search command');
 
       const { stdout, stderr } = await execPromise(command, { maxBuffer: 50 * 1024 * 1024 });
 
@@ -103,10 +133,15 @@ class YouTubeService extends EventEmitter {
         }
       }
 
+      if (!stdout || stdout.trim() === '') {
+        console.warn('⚠️ No results returned from yt-dlp');
+        return [];
+      }
+
       const lines = stdout.trim().split('\n').filter(line => line.trim());
       return lines.map(line => JSON.parse(line));
     } catch (error) {
-      console.error('YouTube search error:', error);
+      console.error('❌ YouTube search error:', error);
       throw new Error(`YouTube search failed: ${error.message}`);
     }
   }
@@ -117,13 +152,39 @@ class YouTubeService extends EventEmitter {
       const ytDlpCmd = await this._getYtDlpCommand();
       const url = `https://youtube.com/watch?v=${videoId}`;
       
-      const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --dump-json --no-playlist`;
+      // Add --no-warnings to suppress warnings and --verbose for debugging
+      const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --dump-json --no-playlist --no-warnings`;
       
-      console.log('Executing info command');
-      const { stdout } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
-      return JSON.parse(stdout);
+      console.log('📹 Getting video info for:', videoId);
+
+      const { stdout, stderr } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
+
+      if (stderr) {
+        // Log warnings for debugging
+        if (stderr.includes('WARNING')) {
+          console.log('⚠️ yt-dlp warning:', stderr);
+        } else {
+          console.error('❌ yt-dlp error:', stderr);
+        }
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        console.error('❌ Empty response from yt-dlp');
+        throw new Error('No video information returned');
+      }
+
+      // Try to parse the JSON
+      try {
+        const videoInfo = JSON.parse(stdout);
+        console.log('✅ Successfully retrieved video info for:', videoInfo.title || videoId);
+        return videoInfo;
+      } catch (parseError) {
+        console.error('❌ Failed to parse yt-dlp output as JSON');
+        console.error('First 500 chars of output:', stdout.substring(0, 500));
+        throw new Error('Invalid JSON response from yt-dlp');
+      }
     } catch (error) {
-      console.error('Get video info error:', error);
+      console.error('❌ Get video info error:', error);
       throw new Error(`Failed to get video info: ${error.message}`);
     }
   }
@@ -134,13 +195,19 @@ class YouTubeService extends EventEmitter {
       const ytDlpCmd = await this._getYtDlpCommand();
       const url = `https://youtube.com/watch?v=${videoId}`;
       
-      const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --list-formats --no-playlist`;
+      const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --list-formats --no-playlist --no-warnings`;
       
-      console.log('Executing formats command');
-      const { stdout } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
+      console.log('📋 Getting available formats for:', videoId);
+
+      const { stdout, stderr } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
+
+      if (stderr && !stderr.includes('WARNING')) {
+        console.error('yt-dlp error:', stderr);
+      }
+
       return this.parseFormats(stdout);
     } catch (error) {
-      console.error('Get formats error:', error);
+      console.error('❌ Get formats error:', error);
       throw new Error(`Failed to get formats: ${error.message}`);
     }
   }
@@ -156,9 +223,9 @@ class YouTubeService extends EventEmitter {
     const outputTemplate = path.join(downloadDir, '%(title)s.%(ext)s');
     const formatSpec = this.getFormatSpec(format, quality, audioOnly);
 
-    const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} -f ${this._escapeArg(formatSpec)} -o ${this._escapeArg(outputTemplate)} --no-playlist --newline --progress --console-title`;
+    const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} -f ${this._escapeArg(formatSpec)} -o ${this._escapeArg(outputTemplate)} --no-playlist --newline --progress --console-title --no-warnings`;
     
-    console.log('Executing download command');
+    console.log('⬇️ Downloading video:', videoId);
 
     return new Promise((resolve, reject) => {
       const process = exec(command, { maxBuffer: 50 * 1024 * 1024 });
@@ -194,6 +261,7 @@ class YouTubeService extends EventEmitter {
           }
           
           if (filePath && fs.existsSync(filePath)) {
+            console.log('✅ Download complete:', path.basename(filePath));
             resolve({ 
               downloadId, 
               filePath, 
