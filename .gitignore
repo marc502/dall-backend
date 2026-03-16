@@ -1,0 +1,35 @@
+# Create .gitignore file
+echo node_modules/ > .gitignore
+echo temp/ >> .gitignore
+echo .env >> .gitignore
+echo .env.local >> .gitignore
+echo .env.production >> .gitignore
+echo .DS_Store >> .gitignore
+echo npm-debug.log* >> .gitignore
+echo *.pid >> .gitignore
+# Dependencies
+node_modules/
+
+# Temp directories
+temp/
+uploads/
+downloads/
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime data
+pids
+*.pid
+*.seed
