@@ -33,3 +33,6 @@ Thumbs.db
 pids
 *.pid
 *.seed
+# Cookies
+cookies.txt
+*.txt
