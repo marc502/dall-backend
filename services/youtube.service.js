@@ -12,25 +12,47 @@ class YouTubeService extends EventEmitter {
     super();
     this.downloads = new Map();
     this.cookiesPath = path.join(__dirname, '../cookies.txt');
-    // You can also use environment variable for visitor data
     this.visitorData = process.env.YOUTUBE_VISITOR_DATA || '';
+    
+    // Path to bundled yt-dlp executable
+    this.ytDlpPath = path.join(__dirname, '../bin/yt-dlp');
+    
+    // Check if we're on Windows (for development)
+    if (process.platform === 'win32') {
+      this.ytDlpPath = path.join(__dirname, '../bin/yt-dlp.exe');
+    }
   }
 
   _escapeArg(arg) {
     return `"${arg.replace(/"/g, '\\"')}"`;
   }
 
+  async _getYtDlpCommand() {
+    // Check if bundled executable exists
+    try {
+      const exists = await fs.pathExists(this.ytDlpPath);
+      if (exists) {
+        console.log('Using bundled yt-dlp executable');
+        return this.ytDlpPath;
+      }
+    } catch (error) {
+      console.warn('Error checking for bundled yt-dlp:', error.message);
+    }
+    
+    // Fall back to python module if bundled executable not found
+    console.log('Falling back to python module');
+    return 'python -m yt_dlp';
+  }
+
   async _getAuthOptions() {
     const options = [];
     
-    // Check if cookies file exists
     try {
       const cookiesExist = await fs.pathExists(this.cookiesPath);
       if (cookiesExist) {
         options.push(`--cookies ${this._escapeArg(this.cookiesPath)}`);
         console.log('Using cookies for authentication');
       } else if (this.visitorData) {
-        // Fall back to visitor data + extractor args if cookies aren't available
         const extractorArgs = `youtubetab:skip=webpage;youtube:player_skip=webpage,configs;visitor_data=${this.visitorData}`;
         options.push(`--extractor-args ${this._escapeArg(extractorArgs)}`);
         console.log('Using visitor data for authentication');
@@ -48,15 +70,16 @@ class YouTubeService extends EventEmitter {
     try {
       const escapedQuery = query.replace(/"/g, '\\"');
       const authOptions = await this._getAuthOptions();
+      const ytDlpCmd = await this._getYtDlpCommand();
       
-      const command = `python -m yt_dlp ${authOptions} "ytsearch${maxResults}:${escapedQuery}" --dump-json --no-playlist --skip-download`;
+      const command = `${ytDlpCmd} ${authOptions} "ytsearch${maxResults}:${escapedQuery}" --dump-json --no-playlist --skip-download`;
       
       console.log('Executing search command:', command);
 
       const { stdout, stderr } = await execPromise(command, { maxBuffer: 50 * 1024 * 1024 });
 
       if (stderr) {
-        // Don't log warnings as errors, they're usually harmless
+        // Log warnings but don't treat as errors
         if (!stderr.includes('WARNING')) {
           console.error('yt-dlp stderr:', stderr);
         }
@@ -73,8 +96,10 @@ class YouTubeService extends EventEmitter {
   async getVideoInfo(videoId) {
     try {
       const authOptions = await this._getAuthOptions();
+      const ytDlpCmd = await this._getYtDlpCommand();
       const url = `https://youtube.com/watch?v=${videoId}`;
-      const command = `python -m yt_dlp ${authOptions} ${this._escapeArg(url)} --dump-json --no-playlist`;
+      
+      const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --dump-json --no-playlist`;
       
       console.log('Executing info command');
       const { stdout } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
@@ -88,8 +113,10 @@ class YouTubeService extends EventEmitter {
   async getAvailableFormats(videoId) {
     try {
       const authOptions = await this._getAuthOptions();
+      const ytDlpCmd = await this._getYtDlpCommand();
       const url = `https://youtube.com/watch?v=${videoId}`;
-      const command = `python -m yt_dlp ${authOptions} ${this._escapeArg(url)} --list-formats --no-playlist`;
+      
+      const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --list-formats --no-playlist`;
       
       console.log('Executing formats command');
       const { stdout } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
@@ -106,11 +133,12 @@ class YouTubeService extends EventEmitter {
     await fs.ensureDir(downloadDir);
 
     const authOptions = await this._getAuthOptions();
+    const ytDlpCmd = await this._getYtDlpCommand();
     const url = `https://youtube.com/watch?v=${videoId}`;
     const outputTemplate = path.join(downloadDir, '%(title)s.%(ext)s');
     const formatSpec = this.getFormatSpec(format, quality, audioOnly);
 
-    const command = `python -m yt_dlp ${authOptions} ${this._escapeArg(url)} -f ${this._escapeArg(formatSpec)} -o ${this._escapeArg(outputTemplate)} --no-playlist --newline --progress --console-title`;
+    const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} -f ${this._escapeArg(formatSpec)} -o ${this._escapeArg(outputTemplate)} --no-playlist --newline --progress --console-title`;
     
     console.log('Executing download command');
 
@@ -129,7 +157,6 @@ class YouTubeService extends EventEmitter {
 
       process.stderr.on('data', (data) => {
         const error = data.toString();
-        // Don't log warnings as errors
         if (!error.includes('WARNING')) {
           console.error('yt-dlp error:', error);
         }
@@ -186,6 +213,7 @@ class YouTubeService extends EventEmitter {
     const lines = output.split('\n');
     const formats = [];
     let parsing = false;
+    
     for (const line of lines) {
       if (line.includes('ID  EXT')) {
         parsing = true;
