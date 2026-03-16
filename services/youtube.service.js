@@ -11,8 +11,8 @@ class YouTubeService extends EventEmitter {
   constructor() {
     super();
     this.downloads = new Map();
-    this.cookiesPath = path.join(__dirname, '../cookies.txt');
     this.visitorData = process.env.YOUTUBE_VISITOR_DATA || '';
+    this.cookiesPath = null;
     
     // Path to bundled yt-dlp executable
     this.ytDlpPath = path.join(__dirname, '../bin/yt-dlp');
@@ -22,53 +22,108 @@ class YouTubeService extends EventEmitter {
       this.ytDlpPath = path.join(__dirname, '../bin/yt-dlp.exe');
     }
     
-    // Ensure executable permissions on Linux/Mac
-    this._ensureExecutablePermissions();
-    
-    // Check if cookies exist at startup
-    this._checkCookies();
+    // Initialize everything
+    this._initialize();
   }
 
-  async _checkCookies() {
-    try {
-      const cookiesExist = await fs.pathExists(this.cookiesPath);
-      if (cookiesExist) {
-        const stats = await fs.stat(this.cookiesPath);
-        console.log(`✅ Cookies file found at: ${this.cookiesPath}`);
-        console.log(`📁 File size: ${stats.size} bytes`);
+  async _initialize() {
+    await this._ensureExecutablePermissions();
+    await this._findCookiesFile();
+    await this._verifyYtDlp();
+  }
+
+  async _findCookiesFile() {
+    console.log('🔍 Searching for cookies.txt...');
+    
+    // Log current environment for debugging
+    console.log('Current directory:', process.cwd());
+    console.log('__dirname:', __dirname);
+    
+    const possiblePaths = [
+      // Absolute paths for Render
+      '/opt/render/project/src/cookies.txt',
+      '/opt/render/project/src/backend/cookies.txt',
+      '/opt/render/project/src/src/cookies.txt',
+      
+      // Relative paths from various locations
+      path.join(__dirname, '../cookies.txt'),           // backend/cookies.txt
+      path.join(__dirname, 'cookies.txt'),              // backend/services/cookies.txt
+      path.join(process.cwd(), 'cookies.txt'),          // root/cookies.txt
+      path.join(process.cwd(), 'backend/cookies.txt'),  // root/backend/cookies.txt
+      path.join(__dirname, '../../cookies.txt'),        // one level up from backend
+      
+      // Development paths
+      path.join('D:', 'dall', 'backend', 'cookies.txt'),
+      path.join('D:', 'dall', 'backend', 'services', 'cookies.txt')
+    ];
+    
+    for (const testPath of possiblePaths) {
+      try {
+        console.log(`Checking: ${testPath}`);
+        const exists = await fs.pathExists(testPath);
         
-        // Read first line to verify format
-        const fileContent = await fs.readFile(this.cookiesPath, 'utf8');
-        const firstLine = fileContent.split('\n')[0];
-        if (firstLine.includes('# Netscape HTTP Cookie File')) {
-          console.log('✅ Cookies file format is correct');
-        } else {
-          console.warn('⚠️ Cookies file may have incorrect format');
+        if (exists) {
+          const stats = await fs.stat(testPath);
+          console.log(`✅ FOUND COOKIES at: ${testPath}`);
+          console.log(`📁 Size: ${stats.size} bytes`);
+          
+          // Read first line to verify format
+          const fileContent = await fs.readFile(testPath, 'utf8');
+          const firstLine = fileContent.split('\n')[0];
+          if (firstLine.includes('# Netscape')) {
+            console.log('✅ Cookies format is correct');
+          } else {
+            console.warn('⚠️ Cookies may have incorrect format');
+            console.log('First line:', firstLine);
+          }
+          
+          this.cookiesPath = testPath;
+          return true;
         }
-      } else {
-        console.warn('⚠️ No cookies file found at:', this.cookiesPath);
+      } catch (err) {
+        console.log(`Error checking ${testPath}:`, err.message);
       }
-    } catch (error) {
-      console.warn('⚠️ Error checking cookies:', error.message);
     }
+    
+    console.warn('❌ NO COOKIES FILE FOUND ANYWHERE');
+    console.log('Files in current directory:', await fs.readdir(process.cwd()).catch(() => 'Cannot read'));
+    
+    // Try to list files in parent directories
+    try {
+      const parentDir = path.join(__dirname, '..');
+      console.log(`Files in ${parentDir}:`, await fs.readdir(parentDir));
+    } catch (err) {
+      console.log('Cannot read parent directory');
+    }
+    
+    return false;
   }
 
   async _ensureExecutablePermissions() {
     try {
-      // Only needed on non-Windows platforms
       if (process.platform !== 'win32') {
         const exists = await fs.pathExists(this.ytDlpPath);
         if (exists) {
-          await fs.chmod(this.ytDlpPath, 0o755); // rwxr-xr-x permissions
+          await fs.chmod(this.ytDlpPath, 0o755);
           console.log('✅ Set executable permissions on yt-dlp');
-          
-          // Verify it works
-          const { stdout } = await execPromise(`"${this.ytDlpPath}" --version`);
-          console.log(`✅ yt-dlp version: ${stdout.trim()}`);
+        } else {
+          console.warn('⚠️ yt-dlp not found at:', this.ytDlpPath);
         }
       }
     } catch (error) {
-      console.warn('⚠️ Could not set executable permissions:', error.message);
+      console.warn('⚠️ Could not set permissions:', error.message);
+    }
+  }
+
+  async _verifyYtDlp() {
+    try {
+      const exists = await fs.pathExists(this.ytDlpPath);
+      if (exists) {
+        const { stdout } = await execPromise(`"${this.ytDlpPath}" --version`).catch(() => ({ stdout: 'unknown' }));
+        console.log(`✅ yt-dlp version: ${stdout.trim()}`);
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not verify yt-dlp:', error.message);
     }
   }
 
@@ -77,38 +132,46 @@ class YouTubeService extends EventEmitter {
   }
 
   async _getYtDlpCommand() {
-    // Check if bundled executable exists
-    try {
-      const exists = await fs.pathExists(this.ytDlpPath);
-      if (exists) {
-        return this.ytDlpPath;
-      }
-    } catch (error) {
-      console.warn('Error checking for bundled yt-dlp:', error.message);
+    const exists = await fs.pathExists(this.ytDlpPath);
+    if (exists) {
+      return this.ytDlpPath;
     }
-    
-    // Fall back to python module if bundled executable not found
-    console.warn('Falling back to python module');
+    console.warn('⚠️ Falling back to python module');
     return 'python -m yt_dlp';
   }
 
   async _getAuthOptions() {
     const options = [];
     
-    try {
-      const cookiesExist = await fs.pathExists(this.cookiesPath);
-      if (cookiesExist) {
-        options.push(`--cookies ${this._escapeArg(this.cookiesPath)}`);
-        console.log('🔑 Using cookies for authentication');
-      } else if (this.visitorData) {
-        const extractorArgs = `youtubetab:skip=webpage;youtube:player_skip=webpage,configs;visitor_data=${this.visitorData}`;
-        options.push(`--extractor-args ${this._escapeArg(extractorArgs)}`);
-        console.log('🔑 Using visitor data for authentication');
-      } else {
-        console.log('⚠️ No authentication method available');
+    // Try cookies first
+    if (this.cookiesPath) {
+      try {
+        const exists = await fs.pathExists(this.cookiesPath);
+        if (exists) {
+          options.push(`--cookies ${this._escapeArg(this.cookiesPath)}`);
+          console.log('🔑 Using cookies for authentication');
+        } else {
+          console.log('❌ Cookies file missing, trying to find again...');
+          await this._findCookiesFile();
+          if (this.cookiesPath) {
+            options.push(`--cookies ${this._escapeArg(this.cookiesPath)}`);
+            console.log('🔑 Found and using cookies');
+          }
+        }
+      } catch (error) {
+        console.warn('⚠️ Error checking cookies:', error.message);
       }
-    } catch (error) {
-      console.warn('Error checking cookies:', error.message);
+    }
+    
+    // Fall back to visitor data if no cookies
+    if (options.length === 0 && this.visitorData) {
+      const extractorArgs = `youtubetab:skip=webpage;youtube:player_skip=webpage,configs;visitor_data=${this.visitorData}`;
+      options.push(`--extractor-args ${this._escapeArg(extractorArgs)}`);
+      console.log('🔑 Using visitor data for authentication');
+    }
+    
+    if (options.length === 0) {
+      console.log('⚠️ No authentication method available');
     }
     
     return options.join(' ');
@@ -126,11 +189,8 @@ class YouTubeService extends EventEmitter {
 
       const { stdout, stderr } = await execPromise(command, { maxBuffer: 50 * 1024 * 1024 });
 
-      if (stderr) {
-        // Log warnings but don't treat as errors
-        if (!stderr.includes('WARNING')) {
-          console.error('yt-dlp stderr:', stderr);
-        }
+      if (stderr && !stderr.includes('WARNING')) {
+        console.error('yt-dlp stderr:', stderr);
       }
 
       if (!stdout || stdout.trim() === '') {
@@ -152,20 +212,14 @@ class YouTubeService extends EventEmitter {
       const ytDlpCmd = await this._getYtDlpCommand();
       const url = `https://youtube.com/watch?v=${videoId}`;
       
-      // Add --no-warnings to suppress warnings and --verbose for debugging
       const command = `${ytDlpCmd} ${authOptions} ${this._escapeArg(url)} --dump-json --no-playlist --no-warnings`;
       
       console.log('📹 Getting video info for:', videoId);
 
       const { stdout, stderr } = await execPromise(command, { maxBuffer: 10 * 1024 * 1024 });
 
-      if (stderr) {
-        // Log warnings for debugging
-        if (stderr.includes('WARNING')) {
-          console.log('⚠️ yt-dlp warning:', stderr);
-        } else {
-          console.error('❌ yt-dlp error:', stderr);
-        }
+      if (stderr && !stderr.includes('WARNING')) {
+        console.error('❌ yt-dlp error:', stderr);
       }
 
       if (!stdout || stdout.trim() === '') {
@@ -173,7 +227,6 @@ class YouTubeService extends EventEmitter {
         throw new Error('No video information returned');
       }
 
-      // Try to parse the JSON
       try {
         const videoInfo = JSON.parse(stdout);
         console.log('✅ Successfully retrieved video info for:', videoInfo.title || videoId);
