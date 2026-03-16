@@ -34,10 +34,17 @@ https.get(downloadUrl, (response) => {
   
   file.on('finish', () => {
     file.close();
-    // Make executable on Unix-like systems
+    
+    // CRITICAL: Set executable permissions for Linux/Unix
     if (!isWindows) {
-      fs.chmodSync(ytDlpPath, '755');
+      try {
+        fs.chmodSync(ytDlpPath, 0o755); // rwxr-xr-x permissions
+        console.log(`✅ Set executable permissions on ${ytDlpPath}`);
+      } catch (err) {
+        console.error('❌ Failed to set permissions:', err.message);
+      }
     }
+    
     console.log(`✅ yt-dlp downloaded successfully to: ${ytDlpPath}`);
     
     // Verify it works
